@@ -116,6 +116,9 @@ struct xhci_softc {
 	uint8_t sc_conf;
 };
 
+uint32_t xhci_read_1(const struct xhci_softc * const, bus_size_t);
+uint32_t xhci_read_4(const struct xhci_softc * const, bus_size_t);
+void	xhci_write_1(const struct xhci_softc * const, bus_size_t, uint32_t);
 int	xhci_init(struct xhci_softc *);
 int	xhci_intr(void *);
 int	xhci_detach(struct xhci_softc *, int);

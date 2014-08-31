@@ -1,4 +1,5 @@
 /*	$NetBSD: xhci_pci.c,v 1.3 2014/03/29 19:28:25 christos Exp $	*/
+/*	OpenBSD: xhci_pci.c,v 1.4 2014/07/12 17:38:51 yuo Exp	*/
 
 /*
  * Copyright (c) 1998 The NetBSD Foundation, Inc.
@@ -43,6 +44,7 @@ __KERNEL_RCSID(0, "$NetBSD: xhci_pci.c,v 1.3 2014/03/29 19:28:25 christos Exp $"
 #include <sys/bus.h>
 
 #include <dev/pci/pcivar.h>
+#include <dev/pci/pcidevs.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -67,6 +69,42 @@ xhci_pci_match(device_t parent, cfdata_t match, void *aux)
 	    PCI_SUBCLASS(pa->pa_class) == PCI_SUBCLASS_SERIALBUS_USB &&
 	    PCI_INTERFACE(pa->pa_class) == PCI_INTERFACE_XHCI)
 		return 1;
+
+	return 0;
+}
+
+static int
+xhci_pci_port_route(struct xhci_pci_softc *psc)
+{
+	struct xhci_softc * const sc = &psc->sc_xhci;
+
+	pcireg_t val;
+
+	/*
+	 * Check USB3 Port Routing Mask register that indicates the ports
+	 * can be changed from OS, and turn on by USB3 Port SS Enable register.
+	 */
+	val = pci_conf_read(psc->sc_pc, psc->sc_tag, PCI_XHCI_INTEL_USB3PRM);
+	aprint_debug_dev(sc->sc_dev,
+	    "USB3PRM / USB3.0 configurable ports: 0x%08x\n", val);
+
+	pci_conf_write(psc->sc_pc, psc->sc_tag, PCI_XHCI_INTEL_USB3_PSSEN, val);
+	val = pci_conf_read(psc->sc_pc, psc->sc_tag,PCI_XHCI_INTEL_USB3_PSSEN);
+	aprint_debug_dev(sc->sc_dev,
+	    "USB3_PSSEN / Enabled USB3.0 ports under xHCI: 0x%08x\n", val);
+
+	/*
+	 * Check USB2 Port Routing Mask register that indicates the USB2.0
+	 * ports to be controlled by xHCI HC, and switch them to xHCI HC.
+	 */
+	val = pci_conf_read(psc->sc_pc, psc->sc_tag, PCI_XHCI_INTEL_USB2PRM);
+	aprint_debug_dev(sc->sc_dev,
+	    "XUSB2PRM / USB2.0 ports can switch from EHCI to xHCI:"
+	    "0x%08x\n", val);
+	pci_conf_write(psc->sc_pc, psc->sc_tag, PCI_XHCI_INTEL_XUSB2PR, val);
+	val = pci_conf_read(psc->sc_pc, psc->sc_tag, PCI_XHCI_INTEL_XUSB2PR);
+	aprint_debug_dev(sc->sc_dev,
+	    "XUSB2PR / USB2.0 ports under xHCI: 0x%08x\n", val);
 
 	return 0;
 }
@@ -169,6 +207,21 @@ xhci_pci_attach(device_t parent, device_t self, void *aux)
 	if (err) {
 		aprint_error_dev(self, "init failed, error=%d\n", err);
 		goto fail;
+	}
+
+	switch (PCI_VENDOR(pa->pa_id)) {
+	case PCI_VENDOR_INTEL:
+		switch (PCI_PRODUCT(pa->pa_id)) {
+		case PCI_PRODUCT_INTEL_7SERIES_XHCI:
+		case PCI_PRODUCT_INTEL_8SERIES_XHCI:
+		case PCI_PRODUCT_INTEL_CORE4G_M_XHCI:
+			xhci_pci_port_route(psc);
+			break;
+		default:
+			break;
+		}
+	default:
+		break;
 	}
 
 	if (!pmf_device_register1(self, xhci_suspend, xhci_resume,

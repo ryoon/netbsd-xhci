@@ -209,10 +209,23 @@ static const struct usbd_pipe_methods xhci_device_intr_methods = {
 	.done = xhci_device_intr_done,
 };
 
-static inline uint32_t
+inline uint32_t
+xhci_read_1(const struct xhci_softc * const sc, bus_size_t offset)
+{
+	return bus_space_read_1(sc->sc_iot, sc->sc_ioh, offset);
+}
+
+inline uint32_t
 xhci_read_4(const struct xhci_softc * const sc, bus_size_t offset)
 {
 	return bus_space_read_4(sc->sc_iot, sc->sc_ioh, offset);
+}
+
+inline void
+xhci_write_1(const struct xhci_softc * const sc, bus_size_t offset,
+    uint32_t value)
+{
+	bus_space_write_1(sc->sc_iot, sc->sc_ioh, offset, value);
 }
 
 #if 0 /* unused */
