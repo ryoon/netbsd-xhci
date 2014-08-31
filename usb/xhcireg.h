@@ -193,10 +193,8 @@
 /* XHCI legacy support */
 #define	XHCI_XECP_ID(x)		((x) & 0xFF)
 #define	XHCI_XECP_NEXT(x)	(((x) >> 8) & 0xFF)
-#if 0
 #define	XHCI_XECP_BIOS_SEM	0x0002
 #define	XHCI_XECP_OS_SEM	0x0003
-#endif
 
 /* XHCI capability ID's */
 #define	XHCI_ID_USB_LEGACY	0x0001
