@@ -912,11 +912,13 @@ xhci_intr1(struct xhci_softc * const sc)
 
 	iman = xhci_rt_read_4(sc, XHCI_IMAN(0));
 	//device_printf(sc->sc_dev, "%s IMAN0 %08x\n", __func__, iman);
-#if 0
-	if ((iman & XHCI_IMAN_INTR_PEND) == 0) {
-		return 0;
+
+	if (!(sc->sc_xhci_quirks & XHCI_QUIRK_FORCE_INTR)) {
+		if ((iman & XHCI_IMAN_INTR_PEND) == 0) {
+			return 0;
+		}
 	}
-#endif
+
 	xhci_rt_write_4(sc, XHCI_IMAN(0), iman);
 	iman = xhci_rt_read_4(sc, XHCI_IMAN(0));
 	//device_printf(sc->sc_dev, "%s IMAN0 %08x\n", __func__, iman);

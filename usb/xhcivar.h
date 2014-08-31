@@ -114,6 +114,9 @@ struct xhci_softc {
 
 	uint8_t sc_addr;
 	uint8_t sc_conf;
+
+	int sc_xhci_quirks;
+#define XHCI_QUIRK_FORCE_INTR __BIT(0) /* force interrupt reading */
 };
 
 uint32_t xhci_read_1(const struct xhci_softc * const, bus_size_t);
