@@ -209,17 +209,11 @@ xhci_pci_attach(device_t parent, device_t self, void *aux)
 		goto fail;
 	}
 
+	/* Intel chipset requires SuperSpeed enable and USB2 port routing */
 	switch (PCI_VENDOR(pa->pa_id)) {
 	case PCI_VENDOR_INTEL:
-		switch (PCI_PRODUCT(pa->pa_id)) {
-		case PCI_PRODUCT_INTEL_7SERIES_XHCI:
-		case PCI_PRODUCT_INTEL_8SERIES_XHCI:
-		case PCI_PRODUCT_INTEL_CORE4G_M_XHCI:
-			xhci_pci_port_route(psc);
-			break;
-		default:
-			break;
-		}
+		xhci_pci_port_route(psc);
+		break;
 	default:
 		break;
 	}
