@@ -133,40 +133,6 @@ xhci_pci_port_route(struct xhci_pci_softc *psc)
 }
 
 static void
-xhci_pci_takecontroller(struct xhci_pci_softc *psc, int silent)
-{
-	uint32_t cparams, xecp, eec;
-	uint8_t bios_sem;
-	int i;
-
-	cparams = xhci_read_4(&psc->sc_xhci, XHCI_HCCPARAMS);
-	eec = -1;
-
-	/* Synchronise with the BIOS if it owns the controller. */
-	for (xecp = XHCI_HCC_XECP(cparams) << 2; xecp != 0;
-	    xecp = XHCI_XECP_NEXT(eec) << 2) {
-		eec = xhci_read_4(&psc->sc_xhci, xecp);
-		if (XHCI_XECP_ID(eec) != XHCI_ID_USB_LEGACY)
-			continue;
-		bios_sem = xhci_read_1(&psc->sc_xhci,
-		    xecp + XHCI_XECP_BIOS_SEM);
-		if (bios_sem) {
-			xhci_write_1(&psc->sc_xhci, xecp + XHCI_XECP_OS_SEM, 1);
-			aprint_debug("waiting for BIOS to give up control\n");
-			for (i = 0; i < 5000; i++) {
-				bios_sem = xhci_read_1(&psc->sc_xhci, xecp +
-				    XHCI_XECP_BIOS_SEM);
-			if (bios_sem == 0)
-				break;
-			DELAY(1000);
-			}
-		if (silent == 0 && bios_sem)
-			printf("timed out waiting for BIOS\n");
-		}
-	}
-}
-
-static void
 xhci_pci_attach(device_t parent, device_t self, void *aux)
 {
 	struct xhci_pci_softc * const psc = device_private(self);
@@ -263,9 +229,6 @@ xhci_pci_attach(device_t parent, device_t self, void *aux)
 		snprintf(sc->sc_vendor, sizeof(sc->sc_vendor),
 		    "vendor 0x%04x", PCI_VENDOR(pa->pa_id));
 #endif
-
-	/* Take host controller from BIOS */
-	xhci_pci_takecontroller(psc, 0);
 
 	err = xhci_init(sc);
 	if (err) {
