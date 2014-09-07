@@ -226,6 +226,7 @@
 
 struct xhci_trb {
 	uint64_t trb_0;
+#define XHCI_TRB_0_PORTID(x)		(((x) & (0xff << 24)) >> 24)
 	uint32_t trb_2;
 #define XHCI_TRB_2_ERROR_GET(x)         (((x) >> 24) & 0xFF)
 #define XHCI_TRB_2_ERROR_SET(x)         (((x) & 0xFF) << 24)

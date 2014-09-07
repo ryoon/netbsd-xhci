@@ -1494,7 +1494,7 @@ xhci_handle_event(struct xhci_softc * const sc, const struct xhci_trb * const tr
 		}
 		break;
 	case XHCI_TRB_EVENT_PORT_STS_CHANGE:
-		xhci_rhpsc(sc, (uint32_t)((trb_0 >> 24) & 0xff));
+		xhci_rhpsc(sc, (uint32_t)(XHCI_TRB_0_PORTID(trb_0)));
 		break;
 	default:
 		break;
