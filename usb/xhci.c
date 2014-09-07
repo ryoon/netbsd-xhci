@@ -775,16 +775,11 @@ xhci_set_pagesize(struct xhci_softc *sc)
 {
 	uint32_t pagesize;
 
-#if 0
 	pagesize = xhci_op_read_4(sc, XHCI_PAGESIZE);
 	aprint_debug_dev(sc->sc_dev, "PAGESIZE 0x%08x\n", pagesize);
 	pagesize = ffs(pagesize);
 	if (pagesize == 0)
 		return EIO;
-#else
-	/* use 4k page size because it is easy */
-	pagesize = 1;
-#endif
 	sc->sc_pgsz = 1 << (12 + (pagesize - 1));
 	aprint_debug_dev(sc->sc_dev, "sc_pgsz 0x%08x\n", (uint32_t)sc->sc_pgsz);
 }
