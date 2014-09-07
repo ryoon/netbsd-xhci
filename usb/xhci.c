@@ -578,36 +578,76 @@ hexdump(const char *msg, const void *base, size_t len)
 #endif
 }
 
+/*
+ * Reset host controller
+ */
+static int
+xhci_hc_reset(struct xhci_softc *sc)
+{
+	uint32_t usbcmd, usbsts;
+	int i;
 
-int
-xhci_init(struct xhci_softc *sc)
+	/* Halt host controller */
+	usbcmd = 0;
+	xhci_op_write_4(sc, XHCI_USBCMD, usbcmd);
+	/* Waiting halt is done */
+	for (i = 0; i < 100; i++) {
+		usbcmd = xhci_op_read_4(sc, XHCI_USBCMD);
+		if ((usbcmd & XHCI_STS_HCH) == 0)
+			break;
+		usb_delay_ms(&sc->sc_bus, 1);
+	}
+	if (i >= 100) {
+		aprint_error_dev(sc->sc_dev, "halt timeout\n");
+		return EIO;
+	}
+
+	/* Reset host controller */
+	usbcmd = XHCI_CMD_HCRST;
+	xhci_op_write_4(sc, XHCI_USBCMD, usbcmd);
+	/* Waiting reset is done */
+	for (i = 0; i < 100; i++) {
+		usbcmd = xhci_op_read_4(sc, XHCI_USBCMD);
+		if ((usbcmd & XHCI_CMD_HCRST) == 0)
+			break;
+		usb_delay_ms(&sc->sc_bus, 1);
+	}
+	if (i >= 100) {
+		aprint_error_dev(sc->sc_dev, "reset timeout\n");
+		return EIO;
+	}
+
+	/* Waiting host controller ready */
+	for (i = 0; i < 100; i++) {
+		usbsts = xhci_op_read_4(sc, XHCI_USBSTS);
+		if ((usbsts & XHCI_STS_CNR) == 0)
+			break;
+		usb_delay_ms(&sc->sc_bus, 1);
+	}
+	if (i >= 100) {
+		aprint_error_dev(sc->sc_dev, "controller ready timeout\n");
+		return EIO;
+	}
+
+	return 0;
+}
+
+/*
+ * Add handles for xhci_*_{read,write}_? functions.
+ */
+static int
+xhci_subregion(struct xhci_softc *sc)
 {
 	bus_size_t bsz;
-	uint32_t cap, hcs1, hcs2, hcc, dboff, rtsoff;
-	uint32_t ecp, ecr;
-	uint32_t usbcmd, usbsts, pagesize, config;
-	int i;
-	uint16_t hciversion;
+	uint32_t hcs1;
+	uint32_t cap;
+	uint32_t dboff, rtsoff;
 	uint8_t caplength;
-
-	DPRINTF(("%s\n", __func__));
-
-	/* XXX Low/Full/High speeds for now */
-	sc->sc_bus.usbrev = USBREV_2_0;
 
 	cap = xhci_read_4(sc, XHCI_CAPLENGTH);
 	caplength = XHCI_CAP_CAPLENGTH(cap);
-	hciversion = XHCI_CAP_HCIVERSION(cap);
 
-	if ((hciversion < 0x0096) || (hciversion > 0x0100)) {
-		aprint_normal_dev(sc->sc_dev,
-		    "xHCI version %x.%x not known to be supported\n",
-		    (hciversion >> 8) & 0xff, (hciversion >> 0) & 0xff);
-	} else {
-		aprint_verbose_dev(sc->sc_dev, "xHCI version %x.%x\n",
-		    (hciversion >> 8) & 0xff, (hciversion >> 0) & 0xff);
-	}
-
+	/* Create sc->sc_cbh handle for capability register */
 	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, 0, caplength,
 	    &sc->sc_cbh) != 0) {
 		aprint_error_dev(sc->sc_dev, "capability subregion failure\n");
@@ -615,18 +655,84 @@ xhci_init(struct xhci_softc *sc)
 	}
 
 	hcs1 = xhci_cap_read_4(sc, XHCI_HCSPARAMS1);
-	sc->sc_maxslots = XHCI_HCS1_MAXSLOTS(hcs1);
-	sc->sc_maxintrs = XHCI_HCS1_MAXINTRS(hcs1);
 	sc->sc_maxports = XHCI_HCS1_MAXPORTS(hcs1);
-	hcs2 = xhci_cap_read_4(sc, XHCI_HCSPARAMS2);
-	(void)xhci_cap_read_4(sc, XHCI_HCSPARAMS3);
+
+	/* Create sc->sc_obh handle for operational register */
+	bsz = XHCI_PORTSC(sc->sc_maxports + 1);
+	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, caplength, bsz,
+	    &sc->sc_obh) != 0) {
+		aprint_error_dev(sc->sc_dev, "operational subregion failure\n");
+		return ENOMEM;
+	}
+
+	sc->sc_maxslots = XHCI_HCS1_MAXSLOTS(hcs1);
+
+	/* Create sc->sc_dbh handle for doorbell register */
+	dboff = xhci_cap_read_4(sc, XHCI_DBOFF);
+	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, dboff,
+	    sc->sc_maxslots * 4, &sc->sc_dbh) != 0) {
+		aprint_error_dev(sc->sc_dev, "doorbell subregion failure\n");
+		return ENOMEM;
+	}
+
+	sc->sc_maxintrs = XHCI_HCS1_MAXINTRS(hcs1);
+
+	/* Create sc->sc_rbh handle for runtime register */
+	rtsoff = xhci_cap_read_4(sc, XHCI_RTSOFF);
+	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, rtsoff,
+	    sc->sc_maxintrs * 0x20, &sc->sc_rbh) != 0) {
+		aprint_error_dev(sc->sc_dev, "runtime subregion failure\n");
+		return ENOMEM;
+	}
+
+	return 0;
+}
+
+static int
+xhci_check_version(struct xhci_softc *sc)
+{
+	uint32_t cap;
+	uint16_t hciversion;
+
+	cap = xhci_read_4(sc, XHCI_CAPLENGTH);
+	hciversion = XHCI_CAP_HCIVERSION(cap);
+
+	/* Check supported xHCI version */
+	if ((hciversion < 0x0096) || (hciversion > 0x0100)) {
+		aprint_error_dev(sc->sc_dev,
+		    "xHCI version %x.%x not known to be supported\n",
+		    (hciversion >> 8) & 0xff, (hciversion >> 0) & 0xff);
+	} else {
+		aprint_verbose_dev(sc->sc_dev, "xHCI version %x.%x\n",
+		    (hciversion >> 8) & 0xff, (hciversion >> 0) & 0xff);
+	}
+
+	return 0;
+}
+
+static void
+xhci_check_ac64(struct xhci_softc *sc)
+{
+	uint32_t hcc;
+
 	hcc = xhci_cap_read_4(sc, XHCI_HCCPARAMS);
 
+	/* Check context size */
 	sc->sc_ac64 = XHCI_HCC_AC64(hcc);
 	sc->sc_ctxsz = XHCI_HCC_CSZ(hcc) ? 64 : 32;
 	aprint_debug_dev(sc->sc_dev, "ac64 %d ctxsz %d\n", sc->sc_ac64,
 	    sc->sc_ctxsz);
+}
 
+static void
+xhci_hsss_ports(struct xhci_softc *sc)
+{
+	uint32_t hcc;
+	uint32_t ecp, ecr;
+
+	hcc = xhci_cap_read_4(sc, XHCI_HCCPARAMS);
+
+	/* Check USB 2.0/USB 3.0 ports */
 	aprint_debug_dev(sc->sc_dev, "xECP %x\n", XHCI_HCC_XECP(hcc) * 4);
 	ecp = XHCI_HCC_XECP(hcc) * 4;
 	while (ecp != 0) {
@@ -662,86 +768,162 @@ xhci_init(struct xhci_softc *sc)
 			ecp += XHCI_XECP_NEXT(ecr) * 4;
 		}
 	}
+}
 
-	bsz = XHCI_PORTSC(sc->sc_maxports + 1);
-	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, caplength, bsz,
-	    &sc->sc_obh) != 0) {
-		aprint_error_dev(sc->sc_dev, "operational subregion failure\n");
-		return ENOMEM;
-	}
+static void
+xhci_set_pagesize(struct xhci_softc *sc)
+{
+	uint32_t pagesize;
 
-	dboff = xhci_cap_read_4(sc, XHCI_DBOFF);
-	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, dboff,
-	    sc->sc_maxslots * 4, &sc->sc_dbh) != 0) {
-		aprint_error_dev(sc->sc_dev, "doorbell subregion failure\n");
-		return ENOMEM;
-	}
-
-	rtsoff = xhci_cap_read_4(sc, XHCI_RTSOFF);
-	if (bus_space_subregion(sc->sc_iot, sc->sc_ioh, rtsoff,
-	    sc->sc_maxintrs * 0x20, &sc->sc_rbh) != 0) {
-		aprint_error_dev(sc->sc_dev, "runtime subregion failure\n");
-		return ENOMEM;
-	}
-
-	for (i = 0; i < 100; i++) {
-		usbsts = xhci_op_read_4(sc, XHCI_USBSTS);
-		if ((usbsts & XHCI_STS_CNR) == 0)
-			break;
-		usb_delay_ms(&sc->sc_bus, 1);
-	}
-	if (i >= 100)
-		return EIO;
-
-	usbcmd = 0;
-	xhci_op_write_4(sc, XHCI_USBCMD, usbcmd);
-	usb_delay_ms(&sc->sc_bus, 1);
-
-	usbcmd = XHCI_CMD_HCRST;
-	xhci_op_write_4(sc, XHCI_USBCMD, usbcmd);
-	for (i = 0; i < 100; i++) {
-		usbcmd = xhci_op_read_4(sc, XHCI_USBCMD);
-		if ((usbcmd & XHCI_CMD_HCRST) == 0)
-			break;
-		usb_delay_ms(&sc->sc_bus, 1);
-	}
-	if (i >= 100)
-		return EIO;
-
-	for (i = 0; i < 100; i++) {
-		usbsts = xhci_op_read_4(sc, XHCI_USBSTS);
-		if ((usbsts & XHCI_STS_CNR) == 0)
-			break;
-		usb_delay_ms(&sc->sc_bus, 1);
-	}
-	if (i >= 100)
-		return EIO;
-
+#if 0
 	pagesize = xhci_op_read_4(sc, XHCI_PAGESIZE);
 	aprint_debug_dev(sc->sc_dev, "PAGESIZE 0x%08x\n", pagesize);
 	pagesize = ffs(pagesize);
 	if (pagesize == 0)
 		return EIO;
+#else
+	/* use 4k page size because it is easy */
+	pagesize = 1;
+#endif
 	sc->sc_pgsz = 1 << (12 + (pagesize - 1));
 	aprint_debug_dev(sc->sc_dev, "sc_pgsz 0x%08x\n", (uint32_t)sc->sc_pgsz);
-	aprint_debug_dev(sc->sc_dev, "sc_maxslots 0x%08x\n",
-	    (uint32_t)sc->sc_maxslots);
+}
 
+static void
+xhci_set_maxsloten(struct xhci_softc *sc)
+{
+	uint32_t config;
+
+	config = xhci_op_read_4(sc, XHCI_CONFIG);
+	config &= ~XHCI_CONFIG_SLOTS_MASK;
+	config |= sc->sc_maxslots & XHCI_CONFIG_SLOTS_MASK;
+	xhci_op_write_4(sc, XHCI_CONFIG, config);
+}
+
+static usbd_status
+xhci_command_ring_init(struct xhci_softc *sc)
+{
 	usbd_status err;
 
+	err = xhci_ring_init(sc, &sc->sc_cr, XHCI_COMMAND_RING_TRBS,
+	    XHCI_COMMAND_RING_SEGMENTS_ALIGN);
+	if (err) {
+		aprint_error_dev(sc->sc_dev, "command ring init fail\n");
+		return err;
+	}
+
+	xhci_op_write_8(sc, XHCI_CRCR, xhci_ring_trbp(&sc->sc_cr, 0) |
+	    sc->sc_cr.xr_cs);
+
+	return USBD_NORMAL_COMPLETION;
+}
+
+static usbd_status
+xhci_event_ring_init(struct xhci_softc *sc)
+{
+	usbd_status err;
+
+	err = xhci_ring_init(sc, &sc->sc_er, XHCI_EVENT_RING_TRBS,
+	    XHCI_EVENT_RING_SEGMENTS_ALIGN);
+	if (err) {
+		aprint_error_dev(sc->sc_dev, "event ring init fail\n");
+		return err;
+	}
+
+	return USBD_NORMAL_COMPLETION;
+}
+
+/*
+ * Allocate event ring segemnts and event ring segments table.
+ */
+static int
+xhci_eventst_init(struct xhci_softc *sc)
+{
+	usb_dma_t *dma;
+	size_t size;
+	size_t align;
+	usbd_status err;
+
+	dma = &sc->sc_eventst_dma;
+	size = roundup2(XHCI_EVENT_RING_SEGMENTS * XHCI_ERSTE_SIZE,
+	    XHCI_EVENT_RING_SEGMENT_TABLE_ALIGN);
+
+	KASSERT(size <= (512 * 1024));
+
+	align = XHCI_EVENT_RING_SEGMENT_TABLE_ALIGN;
+
+	/* Allocate Event ring Segments */
+	err = usb_allocmem(&sc->sc_bus, size, align, dma);
+
+	memset(KERNADDR(dma, 0), 0, size);
+
+	/* Initialize Event Ring Segments */
+	usb_syncmem(dma, 0, size, BUS_DMASYNC_PREWRITE);
+
+	aprint_debug_dev(sc->sc_dev, "eventst: %s %016jx %p %zx\n",
+	    usbd_errstr(err),
+	    (uintmax_t)DMAADDR(&sc->sc_eventst_dma, 0),
+	    KERNADDR(&sc->sc_eventst_dma, 0),
+	    sc->sc_eventst_dma.block->size);
+
+	/* Write Event Ring Segment Table Size */
+	xhci_rt_write_4(sc, XHCI_ERSTSZ(0), XHCI_EVENT_RING_SEGMENTS);
+	/* Write Event Ring Dequeue Pointer */
+	xhci_rt_write_8(sc, XHCI_ERDP(0), xhci_ring_trbp(&sc->sc_er, 0) |
+	    XHCI_ERDP_LO_BUSY);
+	/* Write Event Ring Segment Table Base Address */
+	xhci_rt_write_8(sc, XHCI_ERSTBA(0), DMAADDR(&sc->sc_eventst_dma, 0));
+
+	/*
+	 * Initialize Event Ring Segment Table
+	 * xHCI 1.1 6.5 Event Ring Segment Table
+	 */
+	struct xhci_erste *erst;
+	erst = KERNADDR(&sc->sc_eventst_dma, 0);
+	erst[0].erste_0 = htole64(xhci_ring_trbp(&sc->sc_er, 0));
+	erst[0].erste_2 = htole32(XHCI_EVENT_RING_TRBS);
+	erst[0].erste_3 = htole32(0);
+	usb_syncmem(&sc->sc_eventst_dma, 0,
+	    XHCI_ERSTE_SIZE * XHCI_EVENT_RING_SEGMENTS, BUS_DMASYNC_PREWRITE);
+
+	if (err)
+		return err;
+	else
+		return USBD_NORMAL_COMPLETION;
+}
+
+/*
+ * Setup Device Context Base Address Array
+ */
+static usbd_status
+xhci_dcbaa_init(struct xhci_softc *sc)
+{
+	usb_dma_t *dma;
+	size_t size;
+	size_t align;
+	usbd_status err;
+	uint32_t hcs2;
+	int i;
+
+	/*
+	 * Setup Scratchpad buffer
+	 */
+	hcs2 = xhci_cap_read_4(sc, XHCI_HCSPARAMS2);
 	sc->sc_maxspbuf = XHCI_HCS2_MAXSPBUF(hcs2);
+
 	aprint_debug_dev(sc->sc_dev, "sc_maxspbuf %d\n", sc->sc_maxspbuf);
+
 	if (sc->sc_maxspbuf != 0) {
 		err = usb_allocmem(&sc->sc_bus,
 		    sizeof(uint64_t) * sc->sc_maxspbuf, sizeof(uint64_t),
 		    &sc->sc_spbufarray_dma);
 		if (err)
 			return err;
-		
+
 		sc->sc_spbuf_dma = kmem_zalloc(sizeof(*sc->sc_spbuf_dma) * sc->sc_maxspbuf, KM_SLEEP);
 		uint64_t *spbufarray = KERNADDR(&sc->sc_spbufarray_dma, 0);
 		for (i = 0; i < sc->sc_maxspbuf; i++) {
-			usb_dma_t * const dma = &sc->sc_spbuf_dma[i];
+			dma = &sc->sc_spbuf_dma[i];
 			/* allocate contexts */
 			err = usb_allocmem(&sc->sc_bus, sc->sc_pgsz,
 			    sc->sc_pgsz, dma);
@@ -756,95 +938,123 @@ xhci_init(struct xhci_softc *sc)
 		    sizeof(uint64_t) * sc->sc_maxspbuf, BUS_DMASYNC_PREWRITE);
 	}
 
-	config = xhci_op_read_4(sc, XHCI_CONFIG);
-	config &= ~0xFF;
-	config |= sc->sc_maxslots & 0xFF;
-	xhci_op_write_4(sc, XHCI_CONFIG, config);
-
-	err = xhci_ring_init(sc, &sc->sc_cr, XHCI_COMMAND_RING_TRBS,
-	    XHCI_COMMAND_RING_SEGMENTS_ALIGN);
-	if (err) {
-		aprint_error_dev(sc->sc_dev, "command ring init fail\n");
-		return err;
-	}
-
-	err = xhci_ring_init(sc, &sc->sc_er, XHCI_EVENT_RING_TRBS,
-	    XHCI_EVENT_RING_SEGMENTS_ALIGN);
-	if (err) {
-		aprint_error_dev(sc->sc_dev, "event ring init fail\n");
-		return err;
-	}
-
-	usb_dma_t *dma;
-	size_t size;
-	size_t align;
-
-	dma = &sc->sc_eventst_dma;
-	size = roundup2(XHCI_EVENT_RING_SEGMENTS * XHCI_ERSTE_SIZE,
-	    XHCI_EVENT_RING_SEGMENT_TABLE_ALIGN);
-	KASSERT(size <= (512 * 1024));
-	align = XHCI_EVENT_RING_SEGMENT_TABLE_ALIGN;
-	err = usb_allocmem(&sc->sc_bus, size, align, dma);
-
-	memset(KERNADDR(dma, 0), 0, size);
-	usb_syncmem(dma, 0, size, BUS_DMASYNC_PREWRITE);
-	aprint_debug_dev(sc->sc_dev, "eventst: %s %016jx %p %zx\n",
-	    usbd_errstr(err),
-	    (uintmax_t)DMAADDR(&sc->sc_eventst_dma, 0),
-	    KERNADDR(&sc->sc_eventst_dma, 0),
-	    sc->sc_eventst_dma.block->size);
-
+	/*
+	 * Set up Device Context Base Address Array
+	 */
 	dma = &sc->sc_dcbaa_dma;
 	size = (1 + sc->sc_maxslots) * sizeof(uint64_t);
+
 	KASSERT(size <= 2048);
+
 	align = XHCI_DEVICE_CONTEXT_BASE_ADDRESS_ARRAY_ALIGN;
+
+	/* Allocate Device Context Base Address Array */
 	err = usb_allocmem(&sc->sc_bus, size, align, dma);
 
 	memset(KERNADDR(dma, 0), 0, size);
+
+	/* Initilize Device Context Base Address Array */
+	usb_syncmem(dma, 0, size, BUS_DMASYNC_PREWRITE);
+
 	if (sc->sc_maxspbuf != 0) {
 		/*
 		 * DCBA entry 0 hold the scratchbuf array pointer.
+		 * xHCI 1.1 Table 56
 		 */
 		*(uint64_t *)KERNADDR(dma, 0) =
 		    htole64(DMAADDR(&sc->sc_spbufarray_dma, 0));
 	}
-	usb_syncmem(dma, 0, size, BUS_DMASYNC_PREWRITE);
+
 	aprint_debug_dev(sc->sc_dev, "dcbaa: %s %016jx %p %zx\n",
 	    usbd_errstr(err),
 	    (uintmax_t)DMAADDR(&sc->sc_dcbaa_dma, 0),
 	    KERNADDR(&sc->sc_dcbaa_dma, 0),
 	    sc->sc_dcbaa_dma.block->size);
 
+	/* Write Device Context Base Address Array Pointer */
+	xhci_op_write_8(sc, XHCI_DCBAAP, DMAADDR(&sc->sc_dcbaa_dma, 0));
+
+	if (err)
+		return err;
+	else
+		return USBD_NORMAL_COMPLETION;
+}
+
+int
+xhci_init(struct xhci_softc *sc)
+{
+	int error;
+	usbd_status err;
+
+	DPRINTF(("%s\n", __func__));
+
+	/* XXX Low/Full/High speeds for now */
+	sc->sc_bus.usbrev = USBREV_2_0;
+
+	/* Prepare register read/write functions */
+	error = xhci_subregion(sc);
+	if (error)
+		return error;
+
+	/* Halt and reset host controller */
+	error = xhci_hc_reset(sc);
+	if (error)
+		return error;
+
+	error = xhci_check_version(sc);
+	if (error)
+		return error;
+	/* Check context size, 32 or 64 byte */
+	xhci_check_ac64(sc);
+
+	/* XXX HighSpeed/SuperSpeed ports */
+	xhci_hsss_ports(sc);
+
+	/* Set page size; Always 4k */
+	xhci_set_pagesize(sc);
+
+	aprint_debug_dev(sc->sc_dev, "sc_maxslots 0x%08x\n",
+	    (uint32_t)sc->sc_maxslots);
+
+	/* Set MaxSlotEN to USB_CONFIG register */
+	xhci_set_maxsloten(sc);
+
+	/* Setup Device Context Base Address Array */
+	err = xhci_dcbaa_init(sc);
+	if (err)
+		return err;
+
+	/* Initialize command ring */
+	err = xhci_command_ring_init(sc);
+	if (err)
+		return err;
+
+	/* Initilize event ring */
+	err = xhci_event_ring_init(sc);
+	if (err)
+		return err;
+
+	/* Allocate and initialize event ring segments table */
+	err = xhci_eventst_init(sc);
+	if (err)
+		return err;
+
+	/* Prepare sc_slots */
 	sc->sc_slots = kmem_zalloc(sizeof(*sc->sc_slots) * sc->sc_maxslots,
 	    KM_SLEEP);
 
+	/* Initialize signaling */
 	cv_init(&sc->sc_command_cv, "xhcicmd");
 
-	struct xhci_erste *erst;
-	erst = KERNADDR(&sc->sc_eventst_dma, 0);
-	erst[0].erste_0 = htole64(xhci_ring_trbp(&sc->sc_er, 0));
-	erst[0].erste_2 = htole32(XHCI_EVENT_RING_TRBS);
-	erst[0].erste_3 = htole32(0);
-	usb_syncmem(&sc->sc_eventst_dma, 0,
-	    XHCI_ERSTE_SIZE * XHCI_EVENT_RING_SEGMENTS, BUS_DMASYNC_PREWRITE);
-
-	xhci_rt_write_4(sc, XHCI_ERSTSZ(0), XHCI_EVENT_RING_SEGMENTS);
-	xhci_rt_write_8(sc, XHCI_ERSTBA(0), DMAADDR(&sc->sc_eventst_dma, 0));
-	xhci_rt_write_8(sc, XHCI_ERDP(0), xhci_ring_trbp(&sc->sc_er, 0) |
-	    XHCI_ERDP_LO_BUSY);
-	xhci_op_write_8(sc, XHCI_DCBAAP, DMAADDR(&sc->sc_dcbaa_dma, 0));
-	xhci_op_write_8(sc, XHCI_CRCR, xhci_ring_trbp(&sc->sc_cr, 0) |
-	    sc->sc_cr.xr_cs);
-
-#if 0
-	hexdump("eventst", KERNADDR(&sc->sc_eventst_dma, 0),
-	    XHCI_ERSTE_SIZE * XHCI_EVENT_RING_SEGMENTS);
-#endif
-
-	xhci_rt_write_4(sc, XHCI_IMAN(0), XHCI_IMAN_INTR_ENA);
+	/* Initialize target interrupt moderation rate */
 	xhci_rt_write_4(sc, XHCI_IMOD(0), 0);
 
-	xhci_op_write_4(sc, XHCI_USBCMD, XHCI_CMD_INTE|XHCI_CMD_RS); /* Go! */
+	/* Enable the Interrupter */
+	xhci_rt_write_4(sc, XHCI_IMAN(0), XHCI_IMAN_INTR_ENA);
+
+	/* Enable system bus interrupt generation */
+	/* turn the host controller ON */
+	xhci_op_write_4(sc, XHCI_USBCMD, XHCI_CMD_INTE|XHCI_CMD_RS);
 	aprint_debug_dev(sc->sc_dev, "USBCMD %08"PRIx32"\n",
 	    xhci_op_read_4(sc, XHCI_USBCMD));
 
@@ -852,6 +1062,7 @@ xhci_init(struct xhci_softc *sc)
 	mutex_init(&sc->sc_intr_lock, MUTEX_DEFAULT, IPL_SCHED);
 	cv_init(&sc->sc_softwake_cv, "xhciab");
 
+	/* Initilize transfer buffer */
 	sc->sc_xferpool = pool_cache_init(sizeof(struct xhci_xfer), 0, 0, 0,
 	    "xhcixfer", NULL, IPL_USB, NULL, NULL, NULL);
 
