@@ -39,7 +39,7 @@
 
 #include <sys/cdefs.h>
 
-__KERNEL_RCSID(1, "$NetBSD: dwc_gmac.c,v 1.1 2014/09/08 14:24:32 martin Exp $");
+__KERNEL_RCSID(1, "$NetBSD: dwc_gmac.c,v 1.4 2014/09/09 10:06:47 martin Exp $");
 
 #include "opt_inet.h"
 
@@ -92,7 +92,7 @@ static int dwc_gmac_ioctl(struct ifnet *, u_long, void *);
 #define RX_DESC_OFFSET(N)	((N)*sizeof(struct dwc_gmac_dev_dmadesc))
 
 void
-dwc_gmac_attach(struct dwc_gmac_softc *sc, uint8_t *ep)
+dwc_gmac_attach(struct dwc_gmac_softc *sc, uint8_t *ep, uint32_t mii_clk)
 {
 	uint8_t enaddr[ETHER_ADDR_LEN];
 	uint32_t maclo, machi;
@@ -100,6 +100,7 @@ dwc_gmac_attach(struct dwc_gmac_softc *sc, uint8_t *ep)
 	struct ifnet * const ifp = &sc->sc_ec.ec_if;
 
 	mutex_init(&sc->sc_mdio_lock, MUTEX_DEFAULT, IPL_NET);
+	sc->sc_mii_clk = mii_clk & 7;
 
 	/*
 	 * If the frontend did not pass in a pre-configured ethernet mac
@@ -162,6 +163,7 @@ dwc_gmac_attach(struct dwc_gmac_softc *sc, uint8_t *ep)
 	/*
 	 * Attach MII subdevices
 	 */
+	sc->sc_ec.ec_mii = &sc->sc_mii;
 	ifmedia_init(&mii->mii_media, 0, ether_mediachange, ether_mediastatus);
         mii->mii_ifp = ifp;
         mii->mii_readreg = dwc_gmac_miibus_read_reg;
@@ -240,13 +242,14 @@ dwc_gmac_miibus_read_reg(device_t self, int phy, int reg)
 		| ((reg << GMAC_MII_REG_SHIFT) & GMAC_MII_REG_MASK);
 
 	mutex_enter(&sc->sc_mdio_lock);
-	bus_space_write_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR, miiaddr
-	    | GMAC_MII_CLK_150_250M | GMAC_MII_BUSY);
+	bus_space_write_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR,
+	    miiaddr | GMAC_MII_BUSY | (sc->sc_mii_clk << 2));
 
 	for (cnt = 0; cnt < 1000; cnt++) {
-		if (!(bus_space_read_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR)
-		    & GMAC_MII_BUSY)) {
-			rv = bus_space_read_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIDATA);
+		if (!(bus_space_read_4(sc->sc_bst, sc->sc_bsh,
+		    AWIN_GMAC_MAC_MIIADDR) & GMAC_MII_BUSY)) {
+			rv = bus_space_read_4(sc->sc_bst, sc->sc_bsh,
+			    AWIN_GMAC_MAC_MIIDATA);
 			break;
 		}
 		delay(10);
@@ -266,15 +269,16 @@ dwc_gmac_miibus_write_reg(device_t self, int phy, int reg, int val)
 
 	miiaddr = ((phy << GMAC_MII_PHY_SHIFT) & GMAC_MII_PHY_MASK)
 		| ((reg << GMAC_MII_REG_SHIFT) & GMAC_MII_REG_MASK)
-		| GMAC_MII_BUSY | GMAC_MII_WRITE;
+		| GMAC_MII_BUSY | GMAC_MII_WRITE | (sc->sc_mii_clk << 2);
 
 	mutex_enter(&sc->sc_mdio_lock);
 	bus_space_write_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIDATA, val);
-	bus_space_write_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR, miiaddr);
+	bus_space_write_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR,
+	    miiaddr);
 
 	for (cnt = 0; cnt < 1000; cnt++) {
-		if (!(bus_space_read_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_MIIADDR)
-		    & GMAC_MII_BUSY))
+		if (!(bus_space_read_4(sc->sc_bst, sc->sc_bsh,
+		    AWIN_GMAC_MAC_MIIADDR) & GMAC_MII_BUSY))
 			break;
 		delay(10);
 	}
@@ -599,8 +603,6 @@ dwc_gmac_miibus_statchg(struct ifnet *ifp)
 	struct dwc_gmac_softc * const sc = ifp->if_softc;
 	struct mii_data * const mii = &sc->sc_mii;
 
-printf("dwc_gmac_miibus_statchg called\n");
-
 	/*
 	 * Set MII or GMII interface based on the speed
 	 * negotiated by the PHY.                                           
@@ -793,9 +795,11 @@ dwc_gmac_intr(struct dwc_gmac_softc *sc)
 	uint32_t status, dma_status;
 
 	status = bus_space_read_4(sc->sc_bst, sc->sc_bsh, AWIN_GMAC_MAC_INTR);
-	if (status & AWIN_GMAC_MII_IRQ)
+	if (status & AWIN_GMAC_MII_IRQ) {
 		(void)bus_space_read_4(sc->sc_bst, sc->sc_bsh,
 		    AWIN_GMAC_MII_STATUS);
+		mii_pollstat(&sc->sc_mii);
+	}
 
 	dma_status = bus_space_read_4(sc->sc_bst, sc->sc_bsh,
 	    AWIN_GMAC_DMA_STATUS);
