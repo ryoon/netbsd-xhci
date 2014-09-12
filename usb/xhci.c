@@ -100,8 +100,8 @@ static usbd_status xhci_set_dequeue(usbd_pipe_handle);
 
 static usbd_status xhci_do_command(struct xhci_softc * const,
     struct xhci_trb * const, int);
-static usbd_status xhci_init_slot(struct xhci_softc * const, uint32_t,
-    int, int, int, int);
+static usbd_status xhci_init_slot(struct xhci_softc * const,
+    usbd_device_handle dev, uint32_t, int, int, int, int);
 static usbd_status xhci_enable_slot(struct xhci_softc * const,
     uint8_t * const);
 static usbd_status xhci_address_device(struct xhci_softc * const,
@@ -770,7 +770,7 @@ xhci_hsss_ports(struct xhci_softc *sc)
 	}
 }
 
-static void
+static int
 xhci_set_pagesize(struct xhci_softc *sc)
 {
 	uint32_t pagesize;
@@ -782,6 +782,7 @@ xhci_set_pagesize(struct xhci_softc *sc)
 		return EIO;
 	sc->sc_pgsz = 1 << (12 + (pagesize - 1));
 	aprint_debug_dev(sc->sc_dev, "sc_pgsz 0x%08x\n", (uint32_t)sc->sc_pgsz);
+	return 0;
 }
 
 static void
@@ -980,6 +981,7 @@ xhci_init(struct xhci_softc *sc)
 {
 	int error;
 	usbd_status err;
+	uint32_t usbcmd;
 
 	DPRINTF(("%s\n", __func__));
 
@@ -1023,6 +1025,11 @@ xhci_init(struct xhci_softc *sc)
 	err = xhci_command_ring_init(sc);
 	if (err)
 		return err;
+
+	/* Make sure interrupts are disabled */
+	usbcmd = xhci_op_read_4(sc, XHCI_USBCMD);
+	usbcmd &= ~XHCI_IMAN_INTR_ENA;
+	xhci_op_write_4(sc, XHCI_USBCMD, usbcmd);
 
 	/* Initilize event ring */
 	err = xhci_event_ring_init(sc);
@@ -1137,6 +1144,30 @@ xhci_intr1(struct xhci_softc * const sc)
 	return 1;
 }
 
+static uint32_t
+xhci_gen_route(usbd_device_handle dev)
+{
+	usbd_device_handle hubdev; /* for FOR LOOP */
+	uint32_t route = 0; /* Route String */
+	uint32_t rhport = 0; /* Root hub port */
+	uint8_t depth; /* Distance from root hub */
+
+	for (hubdev = dev; hubdev != NULL; hubdev = hubdev->myhub) {
+		if (hubdev->myhub == NULL)
+			break;
+		depth = hubdev->myhub->depth;
+		rhport = hubdev->powersrc->portno;
+		if (depth == 0)
+			break;
+		if (rhport > 15)
+			rhport = 15;
+		if (depth < 6)
+		route |= rhport << (4 * (depth -1));
+	}
+	aprint_normal("ROUTE = 0x%08x\n", route);
+	return route;
+}
+
 static usbd_status
 xhci_configure_endpoint(usbd_pipe_handle pipe)
 {
@@ -1154,15 +1185,25 @@ xhci_configure_endpoint(usbd_pipe_handle pipe)
 
 	/* XXX ensure input context is available? */
 
+	/* Reset Input Context with 0 */
 	memset(xhci_slot_get_icv(sc, xs, 0), 0, sc->sc_pgsz);
 
+	/* 0th context of Input Context is Input Control Context */
+	/* cp is Input Control Context now */
 	cp = xhci_slot_get_icv(sc, xs, XHCI_ICI_INPUT_CONTROL);
+	/* Drop field is zero, that is not touched */
 	cp[0] = htole32(0);
+	/* Add field's dci-th bit is set, it is enabled */
 	cp[1] = htole32(XHCI_INCTX_1_ADD_MASK(dci));
 
 	/* set up input slot context */
+	/* 1st context of Input Context is Slot Context */
+	/* cp is Slot Context of Input Context now */
 	cp = xhci_slot_get_icv(sc, xs, xhci_dci_to_ici(XHCI_DCI_SLOT));
-	cp[0] = htole32(XHCI_SCTX_0_CTX_NUM_SET(dci));
+	/* Set Context Entries as dci*/
+	cp[0] = htole32(
+	    XHCI_SCTX_0_CTX_NUM_SET(dci)
+	    );
 	cp[1] = htole32(0);
 	cp[2] = htole32(0);
 	cp[3] = htole32(0);
@@ -1740,7 +1781,7 @@ xhci_new_device(device_t parent, usbd_bus_handle bus, int depth,
 		err = xhci_enable_slot(sc, &slot);
 		if (err)
 			return err;
-		err = xhci_init_slot(sc, slot, depth, speed, port, rhport);
+		err = xhci_init_slot(sc, dev, slot, depth, speed, port, rhport);
 		if (err)
 			return err;
 		xs = &sc->sc_slots[slot];
@@ -2085,8 +2126,8 @@ xhci_set_dcba(struct xhci_softc * const sc, uint64_t dcba, int si)
 }
 
 static usbd_status
-xhci_init_slot(struct xhci_softc * const sc, uint32_t slot, int depth,
-    int speed, int port, int rhport)
+xhci_init_slot(struct xhci_softc * const sc, usbd_device_handle dev,
+    uint32_t slot, int depth, int speed, int port, int rhport)
 {
 	struct xhci_slot *xs;
 	usbd_status err;
@@ -2122,12 +2163,14 @@ xhci_init_slot(struct xhci_softc * const sc, uint32_t slot, int depth,
 	xs->xs_idx = slot;
 
 	/* allocate contexts */
+	/* Allocate Device Context */
 	err = usb_allocmem(&sc->sc_bus, sc->sc_pgsz, sc->sc_pgsz,
 	    &xs->xs_dc_dma);
 	if (err)
 		return err;
 	memset(KERNADDR(&xs->xs_dc_dma, 0), 0, sc->sc_pgsz);
 
+	/* Allocate Input Context */
 	err = usb_allocmem(&sc->sc_bus, sc->sc_pgsz, sc->sc_pgsz,
 	    &xs->xs_ic_dma);
 	if (err)
@@ -2142,12 +2185,13 @@ xhci_init_slot(struct xhci_softc * const sc, uint32_t slot, int depth,
 		err = xhci_ring_init(sc, &xs->xs_ep[dci].xe_tr,
 		    XHCI_TRANSFER_RING_TRBS, XHCI_TRB_ALIGN);
 		if (err) {
-			device_printf(sc->sc_dev, "ring init failure\n");
+			device_printf(sc->sc_dev, "xfer ring init failure\n");
 			return err;
 		}
 	}
 
 	/* set up initial input control context */
+	/* Input Control Context and Input Slot context are enabled */
 	cp = xhci_slot_get_icv(sc, xs, XHCI_ICI_INPUT_CONTROL);
 	cp[0] = htole32(0);
 	cp[1] = htole32(XHCI_INCTX_1_ADD_MASK(XHCI_DCI_EP_CONTROL)|
@@ -2157,7 +2201,8 @@ xhci_init_slot(struct xhci_softc * const sc, uint32_t slot, int depth,
 	cp = xhci_slot_get_icv(sc, xs, xhci_dci_to_ici(XHCI_DCI_SLOT));
 	cp[0] = htole32(
 		XHCI_SCTX_0_CTX_NUM_SET(1) |
-		XHCI_SCTX_0_SPEED_SET(xspeed)
+		XHCI_SCTX_0_SPEED_SET(xspeed) |
+		XHCI_SCTX_0_ROUTE_GET(xhci_gen_route(dev))
 		);
 	cp[1] = htole32(
 		XHCI_SCTX_1_RH_PORT_SET(rhport)
