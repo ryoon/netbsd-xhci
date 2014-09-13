@@ -69,10 +69,6 @@ int xhcidebug = 0;
 
 #define XHCI_ICI_INPUT_CONTROL 0
 
-struct xhci_pipe {
-	struct usbd_pipe xp_pipe;
-};
-
 #define XHCI_INTR_ENDPT 1
 #define XHCI_COMMAND_RING_TRBS 256
 #define XHCI_EVENT_RING_TRBS 256
@@ -1070,7 +1066,7 @@ xhci_init(struct xhci_softc *sc)
 
 	/* Set up the bus struct. */
 	sc->sc_bus.methods = &xhci_bus_methods;
-	sc->sc_bus.pipe_size = sizeof(struct xhci_pipe);
+	sc->sc_bus.pipe_size = sizeof(struct usbd_pipe);
 
 	return USBD_NORMAL_COMPLETION;
 }
