@@ -1,4 +1,4 @@
-/*	$NetBSD: ehci.c,v 1.230 2014/09/13 08:15:43 skrll Exp $ */
+/*	$NetBSD: ehci.c,v 1.232 2014/09/13 18:36:45 skrll Exp $ */
 
 /*
  * Copyright (c) 2004-2012 The NetBSD Foundation, Inc.
@@ -53,7 +53,7 @@
  */
 
 #include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: ehci.c,v 1.230 2014/09/13 08:15:43 skrll Exp $");
+__KERNEL_RCSID(0, "$NetBSD: ehci.c,v 1.232 2014/09/13 18:36:45 skrll Exp $");
 
 #include "ohci.h"
 #include "uhci.h"
@@ -1616,7 +1616,7 @@ ehci_dump_qtd(ehci_qtd_t *qtd)
 
 	USBHIST_LOGN(ehcidebug, 10,
 	    "     next = 0x%08x  altnext = 0x%08x  status = 0x%08x",
-	    qtd->qtd_altnext, qtd->qtd_next, s, 0);
+	    qtd->qtd_next, qtd->qtd_altnext, s, 0);
 	USBHIST_LOGN(ehcidebug, 10,
 	    "   toggle = %d ioc = %d bytes = %#x "
 	    "c_page = %#x", EHCI_QTD_GET_TOGGLE(s), EHCI_QTD_GET_IOC(s),
@@ -2979,7 +2979,7 @@ ehci_alloc_sqtd_chain(struct ehci_pipe *epipe, ehci_softc_t *sc,
 		cur->len = curlen;
 
 		USBHIST_LOG(ehcidebug, "cbp=0x%08zx end=0x%08zx",
-			    (size_t)curoffs, (size_t)(curoffs + curlen), 0, 0);
+		    (size_t)curoffs, (size_t)(curoffs + curlen), 0, 0);
 
 		/* adjust the toggle based on the number of packets in this
 		   qtd */
